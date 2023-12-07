@@ -25,8 +25,8 @@ static const u32 DGST_SIZE = DGST_SIZE_4_32;
 static const u32 HASH_CATEGORY = HASH_CATEGORY_CRYPTOCURRENCY_WALLET;
 static const char *HASH_NAME = "Bitcoin seed words and passphrase";
 static const u64 KERN_TYPE = 28510;
-static const u32 OPTI_TYPE = OPTI_TYPE_ZERO_BYTE | OPTI_TYPE_USES_BITS_64 | OPTI_TYPE_SLOW_HASH_SIMD_LOOP;
-static const u64 OPTS_TYPE = OPTS_TYPE_COPY_TMPS;
+static const u32 OPTI_TYPE = OPTI_TYPE_ZERO_BYTE | OPTI_TYPE_USES_BITS_64 | OPTI_TYPE_SLOW_HASH_SIMD_LOOP | OPTI_TYPE_SLOW_HASH_SIMD_LOOP2;
+static const u64 OPTS_TYPE = OPTS_TYPE_COPY_TMPS | OPTS_TYPE_INIT2 | OPTS_TYPE_LOOP2;
 static const u32 SALT_TYPE = SALT_TYPE_EMBEDDED;
 static const char *ST_PASS = "hashcat";
 static const char *ST_HASH = "P2PKH:m/44h/0h/0h/0/0:balcony,catalog,winner,letter,alley,this:1B2hrNm7JGW6Wenf8oMvjWB3DPT9H9vAJ9";
@@ -57,6 +57,16 @@ DECLSPEC u32 decode_derivation_path (PRIVATE_AS u8 ** derivation_path, PRIVATE_A
   if (derivation_path[0][0] == end_char)
     return DERIVATION_END;
 
+  if (derivation_path[0][0] == ',')
+  {
+    *derivation_path += 1;
+    return DERIVATION_SEPARATOR;
+  }
+  if (derivation_path[0][0] == 'm')
+  {
+    *derivation_path += 2;
+  }
+
   for (int i = 0; i < 9; i++)
   {
     // Parse out the digits or whether child is hardened
@@ -64,15 +74,20 @@ DECLSPEC u32 decode_derivation_path (PRIVATE_AS u8 ** derivation_path, PRIVATE_A
     {
       hardened = DERIVATION_HARDENED;
     }
+    else if (derivation_path[0][0] == '?')
+    {
+      *derivation_path += 1;
+      return DERIVATION_GUESS;
+    }
     else if (derivation_path[0][0] == '/')
     {
       // Ends one child of the derivation path
       *derivation_path += 1;
       return hc_strtoul (word, 0, 10) | hardened;
     }
-    else if (derivation_path[0][0] == end_char)
+    else if (derivation_path[0][0] == end_char || derivation_path[0][0] == ',')
     {
-      // Ends but don't advance derivation_path pointer so we'll return DERIVATION_END next
+      // Ends but don't advance derivation_path pointer so we'll return DERIVATION_END or DERIVATION_SEPARATOR next
       return hc_strtoul (word, 0, 10) | hardened;
     }
     else if (derivation_path[0][0] <= '9' && derivation_path[0][0] >= '0')
@@ -518,6 +533,23 @@ int module_hash_decode (MAYBE_UNUSED const hashconfig_t * hashconfig, MAYBE_UNUS
     salt->salt_buf[salt_index] = derivation;
   }
 
+  // Count derivations
+  u32 derivation_total = 0;
+  u32 derivation_count = 1;
+  for (u32 i = 0; salt->salt_buf[i] != DERIVATION_END; i ++)
+  {
+    if (salt->salt_buf[i] == DERIVATION_GUESS)
+    {
+      derivation_count *= (salt->salt_buf[i+1] & 0x00FFFFFF) + 1;
+    }
+    if (salt->salt_buf[i] == DERIVATION_SEPARATOR)
+    {
+      derivation_total += derivation_count;
+      derivation_count = 1;
+    }
+  }
+  derivation_total += derivation_count;
+
   // Store the mnemonic words in the salt
   for (u32 mnemonic = 0; mnemonic != MNEMONIC_END; salt_index++)
   {
@@ -529,9 +561,11 @@ int module_hash_decode (MAYBE_UNUSED const hashconfig_t * hashconfig, MAYBE_UNUS
 
   // BIP39 requires 2048 iterations of PBKDF2-HMAC-SHA512
   salt->salt_iter = 2047;
+  salt->salt_iter2 = derivation_total;
   salt->salt_len = salt_index + 1;
 
-  // for (int i = 0; i < salt->salt_len; i ++)
+  // printf("\nderivations: %d", derivation_total);
+  // for (u32 i = 0; i < salt->salt_len; i ++)
   // {
   //   printf("\nsalt[%d]: %08x", i, salt->salt_buf[i]);
   // }

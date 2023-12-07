@@ -19,6 +19,10 @@
 #define DERIVATION_END (0x5FFFFFFF)
 // encoding error
 #define DERIVATION_ERROR (0x6FFFFFFF)
+// guess up until the next number
+#define DERIVATION_GUESS (0x7FFFFFFF)
+// guess up until the next number
+#define DERIVATION_SEPARATOR (0x8FFFFFFF)
 // indicates a hardened path XOR with the path
 #define DERIVATION_HARDENED (0x80000000)
 
@@ -31,6 +35,9 @@
 #define P2SHWPKH_ADDRESS_ID (2)
 #define P2WPKH_ADDRESS_ID (3)
 
+// Max derivation path len and stores the index into the salt
+#define PATH_LEN 10
+
 // BIP-39 variables that store the iterations of PBKDF2-SHA512
 typedef struct bip39_tmp
 {
@@ -41,6 +48,9 @@ typedef struct bip39_tmp
   u64 out[16];
 
   u32 salt_index;
+
+  u32 derivation_path[PATH_LEN + 1];
+
 } bip39_tmp_t;
 
 // Represents the current state of encoding a message

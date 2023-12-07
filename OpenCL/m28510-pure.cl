@@ -22,9 +22,6 @@
 #include M2S(INCLUDE_PATH/inc_bip39.cl)
 #endif
 
-#define COMPARE_S M2S(INCLUDE_PATH/inc_comp_single.cl)
-#define COMPARE_M M2S(INCLUDE_PATH/inc_comp_multi.cl)
-
 /*******************************************************************************
  * This section is adapted from the optimized scalar_8x32 operations from
  * https://github.com/bitcoin-core/secp256k1/, MIT license
@@ -413,6 +410,60 @@ DECLSPEC void extended_key_printf (extended_key_t * key)
   }
 }
 
+// Init the derivation path
+DECLSPEC bool init_derivation (PRIVATE_AS u32 * derivation_path, PRIVATE_AS const u32 * derivation_end)
+{
+  u32 i = 0;
+  u32 j = derivation_path[PATH_LEN];
+  for (; derivation_end[j] != DERIVATION_END && derivation_end[j] != DERIVATION_SEPARATOR; i ++, j++)
+  {
+    if (derivation_end[j] == DERIVATION_GUESS)
+    {
+      j++;
+      derivation_path[i] = derivation_end[j] & 0xFF000000;
+    }
+    else
+    {
+      derivation_path[i] = derivation_end[j];
+    }
+  }
+  derivation_path[i] = DERIVATION_END;
+  return true;
+}
+
+// Increments the derivation path
+DECLSPEC bool next_derivation (PRIVATE_AS u32 * derivation_path, PRIVATE_AS const u32 * derivation_end)
+{
+  u32 i = 0;
+  u32 j = derivation_path[PATH_LEN];
+  for (; derivation_end[j] != DERIVATION_END && derivation_end[j] != DERIVATION_SEPARATOR; i ++, j++)
+  {
+    if (derivation_end[j] == DERIVATION_GUESS)
+    {
+      j++;
+
+      if (derivation_path[i] < derivation_end[j])
+      {
+        derivation_path[i] ++;
+        return true;
+      }
+      else if (derivation_path[i] == derivation_end[j])
+      {
+        derivation_path[i] = derivation_end[j] & 0xFF000000;
+      }
+    }
+  }
+
+  if (derivation_end[j] == DERIVATION_SEPARATOR)
+  {
+    derivation_path[PATH_LEN] = j + 1;
+    init_derivation(derivation_path, derivation_end);
+    return true;
+  }
+
+  return false;
+}
+
 /*******************************************************************************
  * This section contains the init, loop, and comp functions required by the pure
  * kernel modules.
@@ -559,76 +610,105 @@ KERNEL_FQ void m28510_loop (KERN_ATTR_TMPS (bip39_tmp_t))
   }
 }
 
-// Final digest comparison depends on the address type
-KERNEL_FQ void m28510_comp (KERN_ATTR_TMPS (bip39_tmp_t))
+// Initialize the first derivation path
+KERNEL_FQ void m28510_init2 (KERN_ATTR_TMPS (bip39_tmp_t))
 {
   const u64 gid = get_global_id (0);
+  const u32 *derivation_end = &salt_bufs[SALT_POS_HOST].salt_buf[1];
+  // Ensure the index into the salt starts at 0
+  tmps[gid].derivation_path[PATH_LEN] = 0;
+  init_derivation(tmps[gid].derivation_path, derivation_end);
 
-  if (gid >= GID_CNT)
-    return;
+  // printf("\ninit2: %lu\n", tmps[gid].out[0]);
+}
+
+// We run once per derivation in this loop to reuse the PBKDF2-HMAC-SHA512 iterations used to generate the seed
+KERNEL_FQ void m28510_loop2 (KERN_ATTR_TMPS (bip39_tmp_t))
+{
+  const u64 gid = get_global_id (0);
 
   // Get hardened 512-bit seed and useful salt values
   u64 *seed = tmps[gid].out;
   const u32 address_id = salt_bufs[SALT_POS_HOST].salt_buf[0];
-  const u32 *derivation_path = &salt_bufs[SALT_POS_HOST].salt_buf[1];
+  const u32 *derivation_end = &salt_bufs[SALT_POS_HOST].salt_buf[1];
+  u32 *derivation_path = tmps[gid].derivation_path;
 
   // 128-bits that get compared with the digest bits
-  u32 r0;
-  u32 r1;
-  u32 r2;
-  u32 r3;
+  u32 * result;
 
-  if (address_id == XPUB_ADDRESS_ID)
+  for (u32 j = 0; j < LOOP_CNT; j++)
   {
-    extended_key_t master_key = extended_key_master (seed);
+      // printf("\nloop2 derivation: ");
+      // for (u32 i = 0; derivation_path[i] != DERIVATION_END; i ++)
+      // {
+      //   printf("%08x/", derivation_path[i]);
+      // }
+      // printf("\ncount: %d \n", LOOP_CNT);
 
-    r0 = hc_swap32_S (master_key.chain_code[0]);
-    r1 = hc_swap32_S (master_key.chain_code[1]);
-    r2 = hc_swap32_S (master_key.chain_code[2]);
-    r3 = hc_swap32_S (master_key.chain_code[3]);
+      // Final digest comparison depends on the address type
+      if (address_id == XPUB_ADDRESS_ID)
+      {
+        extended_key_t master_key = extended_key_master (seed);
+
+        u32 r[4];
+        r[0] = hc_swap32_S (master_key.chain_code[0]);
+        r[1] = hc_swap32_S (master_key.chain_code[1]);
+        r[2] = hc_swap32_S (master_key.chain_code[2]);
+        r[3] = hc_swap32_S (master_key.chain_code[3]);
+        result = r;
+      }
+      else if (address_id == P2PKH_ADDRESS_ID || address_id == P2WPKH_ADDRESS_ID)
+      {
+        const extended_key_t key = extended_key_derivation (seed, derivation_path);
+
+        u32 pubkey[9] = { 0 };
+        msg_encoder_t pubkey_encoder = encoder_init (pubkey);
+
+        encode_compressed_public_key (&pubkey_encoder, &key);
+        ripemd160_ctx_t hash160 = run_hash160 (pubkey, pubkey_encoder.len);
+
+        result = hash160.h;
+      }
+      else if (address_id == P2SHWPKH_ADDRESS_ID)
+      {
+        const extended_key_t key = extended_key_derivation (seed, derivation_path);
+
+        u32 pubkey[9] = { 0 };
+        msg_encoder_t pubkey_encoder = encoder_init (pubkey);
+
+        encode_compressed_public_key (&pubkey_encoder, &key);
+        ripemd160_ctx_t hash160 = run_hash160 (pubkey, pubkey_encoder.len);
+
+        u32 script[9] = { 0 };
+        msg_encoder_t script_encoder = encoder_init (script);
+
+        encode_char (&script_encoder, 0x0);
+        encode_char (&script_encoder, 0x14);
+        encode_array_le (&script_encoder, hash160.h, 20, 0);
+        ripemd160_ctx_t script_hash160 = run_hash160 (script, script_encoder.len);
+
+        result = script_hash160.h;
+      }
+
+      if ((result[0] == digests_buf[DIGESTS_OFFSET_HOST].digest_buf[DGST_R0])
+      && (result[1] == digests_buf[DIGESTS_OFFSET_HOST].digest_buf[DGST_R1])
+      && (result[2] == digests_buf[DIGESTS_OFFSET_HOST].digest_buf[DGST_R2])
+      && (result[3] == digests_buf[DIGESTS_OFFSET_HOST].digest_buf[DGST_R3]))
+      {
+        const u32 final_hash_pos = DIGESTS_OFFSET_HOST + 0;
+
+        if (hc_atomic_inc (&hashes_shown[final_hash_pos]) == 0)
+        {
+          mark_hash (plains_buf, d_return_buf, SALT_POS_HOST, DIGESTS_CNT, 0, final_hash_pos, gid, 0, 0, 0);
+        }
+      }
+
+    next_derivation(derivation_path, derivation_end);
   }
-  else if (address_id == P2PKH_ADDRESS_ID || address_id == P2WPKH_ADDRESS_ID)
-  {
-    const extended_key_t key = extended_key_derivation (seed, derivation_path);
+}
 
-    u32 pubkey[9] = { 0 };
-    msg_encoder_t pubkey_encoder = encoder_init (pubkey);
-
-    encode_compressed_public_key (&pubkey_encoder, &key);
-    ripemd160_ctx_t hash160 = run_hash160 (pubkey, pubkey_encoder.len);
-
-    r0 = hash160.h[0];
-    r1 = hash160.h[1];
-    r2 = hash160.h[2];
-    r3 = hash160.h[3];
-  }
-  else if (address_id == P2SHWPKH_ADDRESS_ID)
-  {
-    const extended_key_t key = extended_key_derivation (seed, derivation_path);
-
-    u32 pubkey[9] = { 0 };
-    msg_encoder_t pubkey_encoder = encoder_init (pubkey);
-
-    encode_compressed_public_key (&pubkey_encoder, &key);
-    ripemd160_ctx_t hash160 = run_hash160 (pubkey, pubkey_encoder.len);
-
-    u32 script[9] = { 0 };
-    msg_encoder_t script_encoder = encoder_init (script);
-
-    encode_char (&script_encoder, 0x0);
-    encode_char (&script_encoder, 0x14);
-    encode_array_le (&script_encoder, hash160.h, 20, 0);
-    ripemd160_ctx_t script_hash160 = run_hash160 (script, script_encoder.len);
-
-    r0 = script_hash160.h[0];
-    r1 = script_hash160.h[1];
-    r2 = script_hash160.h[2];
-    r3 = script_hash160.h[3];
-  }
-
-#define il_pos 0
-
-#ifdef KERNEL_STATIC
-#include COMPARE_M
-#endif
+// Final digest comparison depends on the address type
+KERNEL_FQ void m28510_comp (KERN_ATTR_TMPS (bip39_tmp_t))
+{
+  // Comparison is performed in loop2
 }
