@@ -173,7 +173,7 @@ endif # MSYS2
 ## Misc stuff
 ##
 
-COMPTIME                := $(shell date +%s)
+COMPTIME                := 1702750626
 
 ##
 ## General compiler and linker options
@@ -757,7 +757,7 @@ LFLAGS_CROSS_LINUX      += -lpthread
 LFLAGS_CROSS_LINUX      += -ldl
 LFLAGS_CROSS_LINUX      += -lm
 LFLAGS_CROSS_WIN        := $(LFLAGS)
-LFLAGS_CROSS_WIN        += -Wl,--dynamicbase
+LFLAGS_CROSS_WIN        += -Wl,--dynamicbase,--no-insert-timestamp
 LFLAGS_CROSS_WIN        += -Wl,--nxcompat
 LFLAGS_CROSS_WIN        += -lpsapi
 LFLAGS_CROSS_WIN        += -lws2_32
